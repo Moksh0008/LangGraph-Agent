@@ -1,5 +1,7 @@
-
-langchain-google-genai
+fastapi
+uvicorn
+langchain
 langchain-core
 langgraph
+langchain-google-genai
 google-generativeai
