@@ -241,7 +241,7 @@ def run(request:TaskRequest):
             "status":"error",
             "message":str(e)
         }
-if _name=="main_":
+if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
         app,
