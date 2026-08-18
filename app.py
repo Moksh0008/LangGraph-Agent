@@ -37,22 +37,54 @@ def text(x):
     return str(x)
 
 @tool
-def run_python_code(code:str)->str:
-    """Execute Python code and return output or error."""
-    old=sys.stdout
-    sys.stdout=io.StringIO()
-    try:
-        exec(
-            code.replace("python","").replace("","").strip(),
-            {},{}
-        )
-        out=sys.stdout.getvalue()
-    except Exception:
-        out="Execution Error:\n"+traceback.format_exc()
-    finally:
-        sys.stdout=old
-    return out.strip() or "Success (no terminal output)"
+def run_python_code(code: str) -> str:
+    """Execute Python code and return the standard output or error trace."""
 
+    if not isinstance(code, str):
+        code = str(code)
+
+    # Clean Gemini markdown code fences
+    clean_code = code.strip()
+
+    if clean_code.startswith("```python"):
+        clean_code = clean_code[len("```python"):].strip()
+
+    elif clean_code.startswith("```"):
+        clean_code = clean_code[len("```"):].strip()
+
+    if clean_code.endswith("```"):
+        clean_code = clean_code[:-3].strip()
+
+    old_stdout = sys.stdout
+    new_stdout = io.StringIO()
+
+    sys.stdout = new_stdout
+
+    try:
+        local_scope = {}
+
+        exec(
+            clean_code,
+            {},
+            local_scope
+        )
+
+        result = new_stdout.getvalue()
+
+    except Exception:
+        result = (
+            "Execution Error:\n"
+            + traceback.format_exc()
+        )
+
+    finally:
+        sys.stdout = old_stdout
+
+    return (
+        result.strip()
+        if result.strip()
+        else "Success (no terminal output)"
+    )
 @tool
 def generate_test_cases(task:str)->str:
     """Generate test scenarios for the coding task."""
