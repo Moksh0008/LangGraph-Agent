@@ -1,780 +1,250 @@
-import sys
-import io
-import traceback
-
-from typing import TypedDict, List, Optional
-
-from langchain_core.messages import BaseMessage, HumanMessage
+import os,sys,io,traceback
+from typing import TypedDict,List,Optional
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
+from langchain_core.messages import BaseMessage,HumanMessage
 from langchain_core.tools import tool
-
-from langgraph.graph import StateGraph, START, END
-
+from langgraph.graph import StateGraph,START,END
 from langchain_google_genai import ChatGoogleGenerativeAI
 
+app=FastAPI(title="AI Developer & Tester")
 
-# ============================================================
-# 1. LLM INITIALIZATION
-# ============================================================
+key=os.getenv("GEMINI_API_KEY")
+if not key: raise ValueError("GEMINI_API_KEY not set")
 
-import google.generativeai as genai
-from google.colab import userdata
-
-
-# Retrieve API key from Google Colab Secrets
-try:
-
-    api_key = userdata.get("GEMINI_API_KEY")
-
-    genai.configure(api_key=api_key)
-
-    print("API Key configured successfully.")
-
-except userdata.SecretNotFoundError:
-
-    print("ERROR: GEMINI_API_KEY not found in Colab Secrets.")
-
-    api_key = None
-
-
-# Initialize Gemini
-if api_key:
-
-    llm_flash = ChatGoogleGenerativeAI(
-        model="gemini-3.1-flash-lite-preview",
-        google_api_key=api_key
-    )
-
-    llm = llm_flash
-
-else:
-
-    llm_flash = None
-    llm = None
-
-
-# ============================================================
-# 2. STATE DEFINITION
-# ============================================================
+llm=ChatGoogleGenerativeAI(
+    model="gemini-3.1-flash-lite-preview",
+    google_api_key=key
+)
 
 class CrewState(TypedDict):
+    messages:List[BaseMessage]
+    next_step:Optional[str]
+    code:Optional[str]
+    report:Optional[str]
 
-    messages: List[BaseMessage]
+class TaskRequest(BaseModel):
+    task:str
 
-    # Current location of workflow
-    current_step: Optional[str]
-
-    # Next location of workflow
-    next_step: Optional[str]
-
-    # Generated Python code
-    code: Optional[str]
-
-    # Testing report
-    report: Optional[str]
-
-
-# ============================================================
-# 3. HELPER FUNCTION
-# ============================================================
-
-def get_text_from_response(response):
-
-    """
-    Safely extracts text from Gemini/LangChain response.
-    """
-
-    content = response.content
-
-    if isinstance(content, list):
-
-        text_parts = []
-
-        for item in content:
-
-            if isinstance(item, dict):
-
-                text_parts.append(
-                    item.get("text", "")
-                )
-
-            else:
-
-                text_parts.append(
-                    str(item)
-                )
-
-        return "\n".join(text_parts)
-
-    return str(content)
-
-
-# ============================================================
-# 4. DISPLAY WORKFLOW STATUS
-# ============================================================
-
-def display_workflow_status(current_step, next_step):
-
-    steps = [
-        "task_input",
-        "developer",
-        "tester",
-        "manager_decision",
-        "archiver"
-    ]
-
-    names = {
-        "task_input": "TASK INPUT",
-        "developer": "DEVELOPER",
-        "tester": "TESTER",
-        "manager_decision": "MANAGER",
-        "archiver": "ARCHIVER"
-    }
-
-    print("\n")
-    print("=" * 60)
-    print("              REAL-TIME AI CODING WORKFLOW")
-    print("=" * 60)
-
-    for step in steps:
-
-        if step == current_step:
-
-            symbol = "[▶]"
-
-        elif step == next_step:
-
-            symbol = "[→]"
-
-        else:
-
-            symbol = "[ ]"
-
-        print(f"{symbol} {names[step]}")
-
-    print("-" * 60)
-
-    print(
-        f"Current Step : "
-        f"{names.get(current_step, current_step)}"
-    )
-
-    print(
-        f"Next Step    : "
-        f"{names.get(next_step, next_step)}"
-    )
-
-    print("=" * 60)
-
-
-# ============================================================
-# 5. TOOLS
-# ============================================================
-
-
-# ------------------------------------------------------------
-# TOOL 1 - RUN PYTHON CODE
-# ------------------------------------------------------------
+def text(x):
+    if isinstance(x,str): return x
+    if isinstance(x,list):
+        return "\n".join(
+            str(i.get("text","")) if isinstance(i,dict) else str(i)
+            for i in x
+        )
+    return str(x)
 
 @tool
-def run_python_code(code: str) -> str:
-
-    """
-    Execute Python code and return standard output
-    or an error trace.
-    """
-
-    if not isinstance(code, str):
-
-        code = str(code)
-
-    # Remove markdown code fences
-    clean_code = (
-        code
-        .replace("```python", "")
-        .replace("```", "")
-        .strip()
-    )
-
-    old_stdout = sys.stdout
-
-    new_stdout = io.StringIO()
-
-    sys.stdout = new_stdout
-
+def run_python_code(code:str)->str:
+    """Execute Python code and return output or error."""
+    old=sys.stdout
+    sys.stdout=io.StringIO()
     try:
-
-        local_scope = {}
-
         exec(
-            clean_code,
-            {},
-            local_scope
+            code.replace("python","").replace("","").strip(),
+            {},{}
         )
-
-        result = new_stdout.getvalue()
-
+        out=sys.stdout.getvalue()
     except Exception:
-
-        result = (
-            "Execution Error:\n"
-            + traceback.format_exc()
-        )
-
+        out="Execution Error:\n"+traceback.format_exc()
     finally:
-
-        sys.stdout = old_stdout
-
-    if result.strip():
-
-        return result.strip()
-
-    return "Success (no terminal output)"
-
-
-# ------------------------------------------------------------
-# TOOL 2 - GENERATE TEST CASES
-# ------------------------------------------------------------
+        sys.stdout=old
+    return out.strip() or "Success (no terminal output)"
 
 @tool
-def generate_test_cases(task_description: str) -> str:
+def generate_test_cases(task:str)->str:
+    """Generate test scenarios for the coding task."""
+    p=f"""Generate 3 to 5 specific test scenarios for this coding task:
+'{task}'. Include standard and edge cases. Return numbered list."""
+    return text(llm.invoke(p).content)
 
-    """
-    Generate 3 to 5 specific test scenarios
-    for the given coding task.
-    """
-
-    if llm is None:
-
-        return "LLM is not initialized."
-
-    prompt = f"""
-
-You are a Senior QA Engineer.
-
-Generate 3 to 5 highly specific test scenarios
-for the following Python coding task:
-
-"{task_description}"
-
-Include:
-
-1. Standard test cases
-2. Edge cases
-3. Boundary cases where appropriate
-
-Return the result as a numbered list.
-
-"""
-
-    response = llm.invoke(prompt)
-
-    return get_text_from_response(response)
-
-
-# ============================================================
-# 6. GRAPH NODES
-# ============================================================
-
-
-# ------------------------------------------------------------
-# NODE 1 - TASK INPUT
-# ------------------------------------------------------------
-
-def task_input_node(state: CrewState):
-
-    display_workflow_status(
-        "task_input",
-        "developer"
-    )
-
-    print("\n--- NEW TASK INITIALIZATION ---")
-
-    user_task = input(
-        "\nEnter the coding task "
-        "(or type 'exit' to quit): "
-    ).strip()
-
-    # User wants to exit
-    if user_task.lower() == "exit":
-
-        return {
-
-            "current_step": "task_input",
-
-            "next_step": "exit"
-
-        }
-
-    # New task
+def task_input(s):
     return {
-
-        "messages": [
-            HumanMessage(
-                content=user_task
-            )
+        "messages":[
+            HumanMessage(content=s["messages"][-1].content)
         ],
-
-        "current_step": "task_input",
-
-        "next_step": "developer"
-
+        "next_step":"developer"
     }
 
+def developer(s):
+    task=s["messages"][-1].content
+    p=f"Write a clean Python script to solve this: {task}. Only return code."
+    code=text(llm.invoke(p).content)
+    code=code.replace("python","").replace("","").strip()
+    return {"code":code,"next_step":"tester"}
 
-# ------------------------------------------------------------
-# NODE 2 - DEVELOPER
-# ------------------------------------------------------------
+def tester(s):
+    tests=generate_test_cases.invoke(s["messages"][-1].content)
+    output=run_python_code.invoke({"code":s["code"]})
+    return {
+        "report":
+        f"EXECUTION OUTPUT:\n{output}\n\nTEST SCENARIOS:\n{tests}",
+        "next_step":"manager"
+    }
+def manager(s):
+    print("\n[MANAGER]\n",s.get("report",""))
+    return {"next_step":"archiver"}
 
-def real_time_developer(state: CrewState):
+def archiver(s):
+    return {"next_step":"exit"}
 
-    display_workflow_status(
-        "developer",
-        "tester"
-    )
+g=StateGraph(CrewState)
 
-    print(
-        "\n[Developer] "
-        "Writing dynamic code using LLM..."
-    )
+for name,fn in [
+    ("task_input",task_input),
+    ("developer",developer),
+    ("tester",tester),
+    ("manager",manager),
+    ("archiver",archiver)
+]:
+    g.add_node(name,fn)
 
-    # Get latest task
-    task = state["messages"][-1].content
+g.add_edge(START,"task_input")
+g.add_edge("task_input","developer")
+g.add_edge("developer","tester")
+g.add_edge("tester","manager")
+g.add_edge("manager","archiver")
+g.add_edge("archiver",END)
 
-    # Developer prompt
-    dev_prompt = f"""
+rt_app=g.compile()
 
-Write a clean Python script to solve this coding task:
+@app.get("/",response_class=HTMLResponse)
+def home():
+    return """
+<html>
+<head>
+<title>AI Developer & Tester</title>
+<style>
+body{
+font-family:Arial;
+background:#0f172a;
+color:white;
+max-width:900px;
+margin:auto;
+padding:40px
+}
+.card{
+background:#1e293b;
+padding:20px;
+margin:20px 0;
+border-radius:10px
+}
+textarea{
+width:100%;
+height:120px;
+padding:10px;
+box-sizing:border-box
+}
+button{
+width:100%;
+padding:12px;
+margin-top:10px;
+background:#2563eb;
+color:white;
+border:0;
+border-radius:6px
+}
+pre{
+background:#020617;
+padding:15px;
+white-space:pre-wrap
+}
+</style>
+</head>
 
-{task}
+<body>
 
-Requirements:
+<h1>🤖 AI Developer & Tester</h1>
 
-- Return ONLY Python code.
-- Do NOT include explanation.
-- Do NOT include markdown.
-- Do NOT include ```python.
-- Make the code executable.
-- Use simple and clean Python.
+<div class="card">
+<h2>Enter Coding Task</h2>
 
+<textarea id="task"
+placeholder="Example: Write a Python program to check whether a number is prime.">
+</textarea>
+
+<button onclick="run()">Run Workflow</button>
+</div>
+
+<div id="result"></div>
+
+<script>
+async function run(){
+
+let task=document.getElementById("task").value.trim();
+
+if(!task)
+return alert("Please enter a coding task.");
+
+document.getElementById("result").innerHTML=
+"<p>⏳ AI is working...</p>";
+
+try{
+
+let r=await fetch("/run",{
+method:"POST",
+headers:{"Content-Type":"application/json"},
+body:JSON.stringify({task})
+});
+
+let d=await r.json();
+if(d.status=="success"){
+document.getElementById("result").innerHTML=
+'<div class="card"><h2>Generated Code</h2><pre>'+
+d.generated_code.replace(/</g,"&lt;")+
+'</pre></div>'+
+'<div class="card"><h2>Test Report</h2><pre>'+
+d.report.replace(/</g,"&lt;")+
+'</pre></div>';
+}else{
+document.getElementById("result").innerHTML=
+"<p>"+d.message+"</p>";
+
+}
+}catch(e){
+document.getElementById("result").innerHTML=
+"<p>Error: "+e.message+"</p>";
+}
+}
+</script>
+</body>
+</html>
 """
+@app.post("/run")
+def run(request:TaskRequest):
 
-    # Check LLM
-    if llm_flash is None:
+    task=request.task.strip()
 
-        raise ValueError(
-            "LLM is not initialized. "
-            "Check GEMINI_API_KEY."
-        )
-
-    # Ask Gemini
-    response = llm_flash.invoke(
-        dev_prompt
-    )
-
-    # Extract response
-    code_str = get_text_from_response(
-        response
-    )
-
-    # Clean markdown if Gemini accidentally adds it
-    code_str = (
-        code_str
-        .replace("```python", "")
-        .replace("```", "")
-        .strip()
-    )
-
-    print("\n" + "-" * 60)
-
-    print("GENERATED PYTHON CODE")
-
-    print("-" * 60)
-
-    print(code_str)
-
-    print("-" * 60)
-
-    # Return updated state
-    return {
-
-        "code": code_str,
-
-        "current_step": "developer",
-
-        "next_step": "tester"
-
-    }
-
-
-# ------------------------------------------------------------
-# NODE 3 - TESTER
-# ------------------------------------------------------------
-
-def real_time_tester(state: CrewState):
-
-    display_workflow_status(
-        "tester",
-        "manager_decision"
-    )
-
-    print(
-        "\n[Tester] "
-        "Generating dynamic tests and executing code..."
-    )
-
-    # Get task
-    task = state["messages"][-1].content
-
-    # --------------------------------------------------------
-    # Generate test cases
-    # --------------------------------------------------------
-
-    print(
-        "\n[Tester] Generating test scenarios..."
-    )
-
-    test_cases = generate_test_cases.invoke(
-        task
-    )
-
-    cases_str = str(test_cases)
-
-    # --------------------------------------------------------
-    # Execute developer code
-    # --------------------------------------------------------
-
-    print(
-        "\n[Tester] Executing generated code..."
-    )
-
-    execution_result = run_python_code.invoke(
-        {
-            "code": state["code"]
-        }
-    )
-
-    # --------------------------------------------------------
-    # Generate report
-    # --------------------------------------------------------
-
-    report = f"""
-
-### EXECUTION OUTPUT
-
-{execution_result}
-
-
-### TEST SCENARIOS EVALUATED
-
-{cases_str}
-
-"""
-
-    print("\n" + "=" * 60)
-
-    print("TEST REPORT")
-
-    print("=" * 60)
-
-    print(report)
-
-    print("=" * 60)
-
-    # Return updated state
-    return {
-
-        "report": report,
-
-        "current_step": "tester",
-
-        "next_step": "manager_decision"
-
-    }
-
-
-# ------------------------------------------------------------
-# NODE 4 - MANAGER
-# ------------------------------------------------------------
-
-def manager_decision_node(state: CrewState):
-
-    display_workflow_status(
-        "manager_decision",
-        None
-    )
-
-    print(
-        "\n--- MANAGER DASHBOARD : TEST REPORT ---"
-    )
-
-    print(
-        state.get(
-            "report",
-            "No report available."
-        )
-    )
-
-    print("=" * 60)
-
-    print(
-        "\nManager Options:"
-    )
-
-    print(
-        "1. store   -> Store the task and exit"
-    )
-
-    print(
-        "2. another -> Create another coding task"
-    )
-
-    user_input = input(
-        "\nCommand (store / another): "
-    ).lower().strip()
-
-    # --------------------------------------------------------
-    # Store task
-    # --------------------------------------------------------
-
-    if user_input == "store":
-
+    if not task:
         return {
-
-            "current_step": "manager_decision",
-
-            "next_step": "archiver"
-
+            "status":"error",
+            "message":"Task cannot be empty."
         }
-
-    # --------------------------------------------------------
-    # New task
-    # --------------------------------------------------------
-
-    else:
-
-        return {
-
-            "current_step": "manager_decision",
-
-            "next_step": "task_input"
-
-        }
-
-
-# ------------------------------------------------------------
-# NODE 5 - ARCHIVER
-# ------------------------------------------------------------
-
-def archiver_node(state: CrewState):
-
-    display_workflow_status(
-        "archiver",
-        "exit"
-    )
-
-    print(
-        "\n[Archiver] "
-        "Task stored successfully."
-    )
-
-    print(
-        "[Archiver] "
-        "Closing workflow..."
-    )
-
-    return {
-
-        "current_step": "archiver",
-
-        "next_step": "exit"
-
-    }
-
-
-# ============================================================
-# 7. GRAPH CONSTRUCTION
-# ============================================================
-
-rt_workflow = StateGraph(
-    CrewState
-)
-
-
-# ------------------------------------------------------------
-# Add nodes
-# ------------------------------------------------------------
-
-rt_workflow.add_node(
-    "task_input",
-    task_input_node
-)
-
-rt_workflow.add_node(
-    "developer",
-    real_time_developer
-)
-
-rt_workflow.add_node(
-    "tester",
-    real_time_tester
-)
-
-rt_workflow.add_node(
-    "manager_decision",
-    manager_decision_node
-)
-
-rt_workflow.add_node(
-    "archiver",
-    archiver_node
-)
-
-
-# ============================================================
-# 8. START → TASK INPUT
-# ============================================================
-
-rt_workflow.add_edge(
-    START,
-    "task_input"
-)
-
-
-# ============================================================
-# 9. ROUTING AFTER TASK INPUT
-# ============================================================
-
-def route_from_input(state: CrewState):
-
-    next_step = state.get(
-        "next_step"
-    )
-
-    if next_step == "exit":
-
-        return END
-
-    return "developer"
-
-
-rt_workflow.add_conditional_edges(
-    "task_input",
-    route_from_input
-)
-
-
-# ============================================================
-# 10. DEVELOPER → TESTER
-# ============================================================
-
-rt_workflow.add_edge(
-    "developer",
-    "tester"
-)
-
-
-# ============================================================
-# 11. TESTER → MANAGER
-# ============================================================
-
-rt_workflow.add_edge(
-    "tester",
-    "manager_decision"
-)
-
-
-# ============================================================
-# 12. ROUTING AFTER MANAGER
-# ============================================================
-
-def route_from_decision(state: CrewState):
-
-    next_step = state.get(
-        "next_step"
-    )
-
-    if next_step == "archiver":
-
-        return "archiver"
-
-    return "task_input"
-
-
-rt_workflow.add_conditional_edges(
-    "manager_decision",
-    route_from_decision
-)
-
-
-# ============================================================
-# 13. ARCHIVER → END
-# ============================================================
-
-rt_workflow.add_edge(
-    "archiver",
-    END
-)
-
-
-# ============================================================
-# 14. COMPILE GRAPH
-# ============================================================
-
-rt_app = rt_workflow.compile()
-
-
-print("\n")
-print("=" * 60)
-print(
-    "Interactive pipeline compiled "
-    "and ready for live execution."
-)
-print("=" * 60)
-
-
-# ============================================================
-# 15. EXECUTION LOOP
-# ============================================================
-
-if __name__ == "__main__":
-
     try:
-
-        # Initial state
-        initial_state = {
-
-            "messages": [],
-
-            "current_step": "task_input",
-
-            "next_step": "developer",
-
-            "code": None,
-
-            "report": None
-
+        state=rt_app.invoke({
+            "messages":[HumanMessage(content=task)],
+            "next_step":"task_input",
+            "code":None,
+            "report":None
+        })
+        return {
+            "status":"success",
+            "generated_code":state["code"],
+            "report":state["report"]
         }
-
-        # Start workflow
-        rt_app.invoke(
-            initial_state,
-            config={
-                "recursion_limit": 50
-            }
-        )
-
-    except KeyboardInterrupt:
-
-        print(
-            "\n\nWorkflow stopped by user."
-        )
-
     except Exception as e:
 
-        print(
-            "\nAn error occurred:"
-        )
-
-        print(e)
-
-        traceback.print_exc()
+        print(traceback.format_exc())
+        return {
+            "status":"error",
+            "message":str(e)
+        }
+if _name=="main_":
+    import uvicorn
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=int(os.getenv("PORT",8000))
+    )
